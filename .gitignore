@@ -201,6 +201,11 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Local API research notes
+MINJET_API_NOTES.md
+minjet-openapi-v3.json
+tools/minjet_probe.py
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

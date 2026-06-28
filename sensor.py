@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 from typing import Any
@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import MinjetCoordinator
+from .models import MinjetDeviceDescriptor, as_float, battery_status_raw, battery_status_text, calculate_power_values, get_device_properties
 
 DEBUG_SENSORS: list[
     tuple[str, str, str | None, SensorDeviceClass | None, SensorStateClass | None]
@@ -37,8 +38,12 @@ RAW_SENSORS: list[
     ("WiFiRSSI", "WiFi RSSI", "dBm", None, SensorStateClass.MEASUREMENT),
     ("emFeedbackValue", "EM Feedback Value", "W", SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
     ("batteryStatus", "Battery Status", None, None, None),
+    ("batteryPriorityModeStatus", "Operation Mode", None, None, None),
+    ("batteryChargeLimit", "Battery Charge Limit", "%", None, SensorStateClass.MEASUREMENT),
+    ("batteryDischargeLimit", "Battery Discharge Limit", "%", None, SensorStateClass.MEASUREMENT),
     ("gridImportPower", "Grid Import Power", "W", SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
     ("gridExportPower", "Grid Export Power", "W", SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    ("ratedPower", "Rated Power", "W", SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
 ]
 
 DERIVED_POWER_SENSORS: list[
@@ -64,79 +69,59 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: MinjetCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    coordinator: MinjetCoordinator = hass.data[DOMAIN]["entries"][entry.entry_id]["coordinator"]
 
-    data = coordinator.data or {}
-    stable_device_id = str(data.get("deviceId") or data.get("serialNum") or "unknown")
-    stable_serial = str(data.get("serialNum") or data.get("deviceId") or "unknown")
-    stable_name = data.get("customName") or data.get("deviceName") or "Minjet"
-    stable_model = data.get("productCode") or data.get("productTypeCode") or "Minjet"
-    stable_sw_version = data.get("deviceCurrentVersion")
-
-    entities: list[SensorEntity] = [
-        MinjetRawSensor(
-            coordinator,
-            key,
-            name,
-            unit,
-            device_class,
-            state_class,
-            stable_device_id,
-            stable_serial,
-            stable_name,
-            stable_model,
-            stable_sw_version,
+    entities: list[SensorEntity] = []
+    for descriptor in coordinator.device_descriptors():
+        entities.extend(
+            MinjetRawSensor(
+                coordinator,
+                key,
+                name,
+                unit,
+                device_class,
+                state_class,
+                descriptor,
+            )
+            for key, name, unit, device_class, state_class in RAW_SENSORS
         )
-        for key, name, unit, device_class, state_class in RAW_SENSORS
-    ]
 
-    entities.extend(
-        MinjetDerivedPowerSensor(
-            coordinator,
-            key,
-            name,
-            unit,
-            device_class,
-            state_class,
-            stable_device_id,
-            stable_serial,
-            stable_name,
-            stable_model,
-            stable_sw_version,
+        entities.extend(
+            MinjetDerivedPowerSensor(
+                coordinator,
+                key,
+                name,
+                unit,
+                device_class,
+                state_class,
+                descriptor,
+            )
+            for key, name, unit, device_class, state_class in DERIVED_POWER_SENSORS
         )
-        for key, name, unit, device_class, state_class in DERIVED_POWER_SENSORS
-    )
 
-    entities.extend(
-        MinjetDerivedEnergySensor(
-            coordinator,
-            key,
-            name,
-            stable_device_id,
-            stable_serial,
-            stable_name,
-            stable_model,
-            stable_sw_version,
+        entities.extend(
+            MinjetDerivedEnergySensor(
+                coordinator,
+                key,
+                name,
+                descriptor,
+            )
+            for key, name in DERIVED_ENERGY_SENSORS
         )
-        for key, name in DERIVED_ENERGY_SENSORS
-    )
 
-    entities.extend(
-        MinjetDebugSensor(
-            coordinator,
-            key,
-            name,
-            unit,
-            device_class,
-            state_class,
-            stable_device_id,
-            stable_serial,
-            stable_name,
-            stable_model,
-            stable_sw_version,
+        entities.extend(
+            MinjetDebugSensor(
+                coordinator,
+                key,
+                name,
+                unit,
+                device_class,
+                state_class,
+                descriptor,
+            )
+            for key, name, unit, device_class, state_class in DEBUG_SENSORS
         )
-        for key, name, unit, device_class, state_class in DEBUG_SENSORS
-    )
+
     async_add_entities(entities)
 
 
@@ -149,25 +134,22 @@ class MinjetBaseSensor(CoordinatorEntity[MinjetCoordinator], SensorEntity):
         unit: str | None,
         device_class: SensorDeviceClass | None,
         state_class: SensorStateClass | None,
-        stable_device_id: str,
-        stable_serial: str,
-        stable_name: str,
-        stable_model: str,
-        stable_sw_version: str | None,
+        descriptor: MinjetDeviceDescriptor,
     ) -> None:
         super().__init__(coordinator)
         self._key = key
-        self._attr_name = f"Minjet {name}"
+        self._serial_num = descriptor.serial_num
+        self._attr_name = f"{descriptor.stable_name} {name}"
         self._attr_native_unit_of_measurement = unit
         self._attr_device_class = device_class
         self._attr_state_class = state_class
         self._attr_has_entity_name = False
 
-        self._stable_device_id = stable_device_id
-        self._stable_serial = stable_serial
-        self._stable_name = stable_name
-        self._stable_model = stable_model
-        self._stable_sw_version = stable_sw_version
+        self._stable_device_id = descriptor.stable_device_id
+        self._stable_serial = descriptor.stable_serial
+        self._stable_name = descriptor.stable_name
+        self._stable_model = descriptor.stable_model
+        self._stable_sw_version = descriptor.stable_sw_version
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -184,60 +166,27 @@ class MinjetBaseSensor(CoordinatorEntity[MinjetCoordinator], SensorEntity):
     def unique_id(self) -> str:
         return f"{self._stable_device_id}_{self._key}"
 
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self._device())
+
+    def _device(self) -> dict[str, Any]:
+        return self.coordinator.get_device(self._serial_num)
+
     def _properties(self) -> dict[str, Any]:
-        return (self.coordinator.data or {}).get("properties", {}) or {}
+        return get_device_properties(self._device())
+
+    def _connection(self) -> dict[str, Any]:
+        return self._device().get("_connection", {}) or {}
 
     def _battery_status_raw(self) -> int | None:
-        value = self._properties().get("batteryStatus")
-        return value if isinstance(value, int) else None
+        return battery_status_raw(self._properties())
 
     def _battery_status_text(self) -> str:
-        return {
-            0: "Idle",
-            1: "Charging",
-            2: "Discharging",
-        }.get(self._battery_status_raw(), "Unknown")
+        return battery_status_text(self._properties())
 
     def _calc_values(self) -> dict[str, float]:
-        props = self._properties()
-
-        photovoltaic_power = _as_float(props.get("photovoltaicPower"))
-        output_power = _as_float(props.get("outputPower"))
-        battery_power = _as_float(props.get("batteryPower"))
-        cell_volt_max = _as_float(props.get("cellVoltMax"))
-        cell_volt_min = _as_float(props.get("cellVoltMin"))
-        battery_status = self._battery_status_raw()
-
-        battery_charge_power = 0.0
-        battery_discharge_power = 0.0
-        pv_to_inverter_power = 0.0
-        pv_to_battery_power = 0.0
-        battery_to_inverter_power = 0.0
-
-        if battery_status == 1:
-            battery_charge_power = max(battery_power, 0.0)
-            pv_to_battery_power = battery_charge_power
-            pv_to_inverter_power = max(output_power, 0.0)
-            battery_to_inverter_power = 0.0
-        elif battery_status == 2:
-            battery_discharge_power = max(battery_power, 0.0)
-            battery_to_inverter_power = battery_discharge_power
-            pv_to_inverter_power = max(photovoltaic_power, 0.0)
-            pv_to_battery_power = 0.0
-        else:
-            pv_to_inverter_power = max(min(photovoltaic_power, output_power), 0.0)
-
-        return {
-            "photovoltaic_power": photovoltaic_power,
-            "output_power": output_power,
-            "battery_power": battery_power,
-            "battery_charge_power": round(battery_charge_power, 1),
-            "battery_discharge_power": round(battery_discharge_power, 1),
-            "pv_to_inverter_power": round(pv_to_inverter_power, 1),
-            "pv_to_battery_power": round(pv_to_battery_power, 1),
-            "battery_to_inverter_power": round(battery_to_inverter_power, 1),
-            "cell_voltage_delta": round(max(cell_volt_max - cell_volt_min, 0.0), 1),
-        }
+        return calculate_power_values(self._properties())
 
 
 class MinjetRawSensor(MinjetBaseSensor):
@@ -248,21 +197,39 @@ class MinjetRawSensor(MinjetBaseSensor):
         if self._key == "batteryStatus":
             return self._battery_status_text()
 
+        if self._key == "batteryPriorityModeStatus":
+            value = props.get("batteryPriorityModeStatus")
+            return {
+                0: "erst entladen",
+                1: "erst speichern",
+            }.get(value, "unknown")
+
         if self._key == "gridImportPower":
-            val = _as_float(props.get("emFeedbackValue"))
-            return abs(val) if val < 0 else 0.0
+            value = as_float(props.get("emFeedbackValue"))
+            return abs(value) if value < 0 else 0.0
 
         if self._key == "gridExportPower":
-            val = _as_float(props.get("emFeedbackValue"))
-            return val if val > 0 else 0.0
+            value = as_float(props.get("emFeedbackValue"))
+            return value if value > 0 else 0.0
 
         return props.get(self._key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        if self._key != "batteryStatus":
+        if self._key == "batteryStatus":
+            return {"raw_value": self._battery_status_raw()}
+
+        if self._key == "batteryPriorityModeStatus":
+            return {"raw_value": self._properties().get("batteryPriorityModeStatus")}
+
+        if self._key == "batteryDischargeLimit":
+            return {"visible_in_mode": "erst speichern"}
+
+        if self._key == "batteryChargeLimit":
+            return {"visible_in_mode": "erst speichern"}
+
+        else:
             return None
-        return {"raw_value": self._battery_status_raw()}
 
 
 class MinjetDerivedPowerSensor(MinjetBaseSensor):
@@ -296,18 +263,15 @@ class MinjetDerivedPowerSensor(MinjetBaseSensor):
 class MinjetDebugSensor(MinjetBaseSensor):
     @property
     def native_value(self) -> Any:
-        connection = (self.coordinator.data or {}).get("_connection", {}) or {}
+        connection = self._connection()
 
         if self._key == "connection_mode":
             if connection.get("device_offline", False):
                 return "Offline"
-
             if not connection.get("websocket_enabled", False):
                 return "REST"
-
             if connection.get("websocket_connected", False):
                 return "WebSocket"
-
             return "REST fallback"
 
         if self._key == "websocket_connected":
@@ -315,12 +279,11 @@ class MinjetDebugSensor(MinjetBaseSensor):
 
         if self._key == "device_offline":
             return connection.get("device_offline", False)
-            
+
         if self._key == "offline_minutes":
             offline_since = connection.get("offline_since")
             if not offline_since:
                 return 0
-
             return int((time.time() - offline_since) / 60)
 
         return None
@@ -332,11 +295,7 @@ class MinjetDerivedEnergySensor(MinjetBaseSensor, RestoreEntity):
         coordinator: MinjetCoordinator,
         key: str,
         name: str,
-        stable_device_id: str,
-        stable_serial: str,
-        stable_name: str,
-        stable_model: str,
-        stable_sw_version: str | None,
+        descriptor: MinjetDeviceDescriptor,
     ) -> None:
         super().__init__(
             coordinator=coordinator,
@@ -345,11 +304,7 @@ class MinjetDerivedEnergySensor(MinjetBaseSensor, RestoreEntity):
             unit="kWh",
             device_class=SensorDeviceClass.ENERGY,
             state_class=SensorStateClass.TOTAL_INCREASING,
-            stable_device_id=stable_device_id,
-            stable_serial=stable_serial,
-            stable_name=stable_name,
-            stable_model=stable_model,
-            stable_sw_version=stable_sw_version,
+            descriptor=descriptor,
         )
         self._energy_kwh: float = 0.0
         self._last_update_ts: float | None = None
@@ -376,7 +331,7 @@ class MinjetDerivedEnergySensor(MinjetBaseSensor, RestoreEntity):
 
     def _handle_coordinator_update(self) -> None:
         props = self._properties()
-        current_time = _as_float(props.get("currentTime"))
+        current_time = as_float(props.get("currentTime"))
 
         if current_time <= 0:
             super()._handle_coordinator_update()
@@ -398,15 +353,3 @@ class MinjetDerivedEnergySensor(MinjetBaseSensor, RestoreEntity):
 
         self._last_update_ts = current_time
         super()._handle_coordinator_update()
-
-
-def _as_float(value: Any) -> float:
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-

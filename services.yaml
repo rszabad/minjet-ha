@@ -1,0 +1,51 @@
+set_operation_mode:
+  name: Set operation mode
+  description: Switch between the app modes erst_entladen and erst_speichern.
+  fields:
+    serial_num:
+      required: true
+      selector:
+        text:
+    operation_mode:
+      required: true
+      example: erst_speichern
+      selector:
+        select:
+          options:
+            - erst_entladen
+            - erst_speichern
+
+set_battery_discharge_limit:
+  name: Set battery discharge limit
+  description: Set the lower battery limit used by the app mode erst_speichern.
+  fields:
+    serial_num:
+      required: true
+      selector:
+        text:
+    battery_discharge_limit:
+      required: true
+      example: 25
+      selector:
+        number:
+          min: 20
+          max: 100
+          step: 5
+          mode: box
+
+set_rated_power:
+  name: Set rated power
+  description: Set the rated power for a Minjet device.
+  fields:
+    serial_num:
+      required: true
+      selector:
+        text:
+    rated_power:
+      required: true
+      example: 123
+      selector:
+        number:
+          min: 0
+          max: 800
+          mode: box

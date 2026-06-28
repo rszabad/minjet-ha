@@ -8,13 +8,33 @@ from typing import Any
 
 import aiohttp
 
-from .const import DEVICE_LIST_ENDPOINT, LOGIN_ENDPOINT, TOKEN_REFRESH_INTERVAL_SECONDS
+from .const import (
+    DEVICE_LIST_ENDPOINT,
+    DEVICE_PARAM_ENDPOINT,
+    LOGIN_ENDPOINT,
+    PHOTOVOLTAIC_QUERY_ENDPOINT,
+    SET_RATED_POWER_ENDPOINT,
+    SET_STACKING_PROPERTY_ENDPOINT,
+    STACKING_QUERY_ENDPOINT,
+    TOKEN_REFRESH_INTERVAL_SECONDS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class MinjetApiError(Exception):
     """Base API error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.data = data
 
 
 class MinjetAuthError(MinjetApiError):
@@ -38,20 +58,13 @@ class MinjetApi:
         }
 
         _LOGGER.debug("Minjet login request starting for user: %s", self._username)
-
-        async with self._session.post(
+        resp, data, _text = await self._request_json(
+            "POST",
             LOGIN_ENDPOINT,
-            json=payload,
-            timeout=20,
-        ) as resp:
-            text = await resp.text()
-
-        _LOGGER.debug("Minjet login response status=%s body=%s", resp.status, text)
-
-        try:
-            data = json.loads(text)
-        except Exception as err:
-            raise MinjetApiError(f"Login returned non-JSON: {text}") from err
+            json_body=payload,
+            authenticated=False,
+            retry_auth=False,
+        )
 
         token = data.get("token")
         if resp.status != 200 or data.get("code") != 200 or not isinstance(token, str) or not token.strip():
@@ -103,63 +116,179 @@ class MinjetApi:
         return await self._ensure_valid_token(force_refresh=force_refresh)
 
     async def async_get_devices(self) -> list[dict[str, Any]]:
-        for attempt in (1, 2):
-            force_refresh = attempt == 2
-            await self._ensure_valid_token(force_refresh=force_refresh)
+        data = await self._api_get(DEVICE_LIST_ENDPOINT, "device query")
+        devices = data.get("data", [])
+        if not isinstance(devices, list):
+            raise MinjetApiError(f"Unexpected response: {data}")
+        return devices
 
-            if not isinstance(self._token, str) or not self._token.strip():
-                raise MinjetAuthError(f"Token invalid after login: {self._token!r}")
+    async def async_get_device_param(self, serial_num: str) -> dict[str, Any]:
+        data = await self._api_get(
+            f"{DEVICE_PARAM_ENDPOINT}?serialNumber={serial_num}",
+            f"device param query for {serial_num}",
+        )
+        payload = data.get("data", {})
+        return payload if isinstance(payload, dict) else {}
 
-            headers = {
-                "Authorization": f"Bearer {self._token}",
-            }
+    async def async_get_stacking(self, serial_num: str, realtime_status: int = 1) -> dict[str, Any]:
+        data = await self._api_get(
+            f"{STACKING_QUERY_ENDPOINT}/{serial_num}/{realtime_status}",
+            f"stacking query for {serial_num}",
+        )
+        payload = data.get("data", {})
+        return payload if isinstance(payload, dict) else {}
 
-            _LOGGER.debug("Minjet device query starting with GET")
+    async def async_get_photovoltaic(self, serial_num: str) -> dict[str, Any]:
+        data = await self._api_get(
+            f"{PHOTOVOLTAIC_QUERY_ENDPOINT}/{serial_num}",
+            f"photovoltaic query for {serial_num}",
+        )
+        payload = data.get("data", {})
+        return payload if isinstance(payload, dict) else {}
 
-            async with self._session.get(
-                DEVICE_LIST_ENDPOINT,
-                headers=headers,
-                timeout=20,
-            ) as resp:
-                text = await resp.text()
+    async def async_set_rated_power(self, serial_num: str, value: int | float) -> Any:
+        data = await self._api_post(
+            f"{SET_RATED_POWER_ENDPOINT}/{serial_num}",
+            {
+                "key": "ratedPower",
+                "orderCode": "",
+                "value": value,
+            },
+            f"set rated power for {serial_num}",
+        )
+        return data.get("data")
 
-            _LOGGER.debug("Minjet device query response status=%s body=%s", resp.status, text)
+    async def async_set_operation_mode(self, serial_num: str, mode_value: int) -> Any:
+        return await self.async_set_stacking_property(
+            serial_num,
+            "batteryPriorityModeStatus",
+            mode_value,
+            verify_readback=True,
+        )
 
-            try:
-                data = json.loads(text)
-            except Exception as err:
-                raise MinjetApiError(f"Device query returned non-JSON: {text}") from err
+    async def async_set_battery_discharge_limit(self, serial_num: str, value: int) -> Any:
+        return await self.async_set_stacking_property(
+            serial_num,
+            "batteryDischargeLimit",
+            value,
+            verify_readback=True,
+        )
 
-            if resp.status in (401, 403):
-                _LOGGER.warning(
-                    "Minjet device query returned %s. Refreshing token and retrying once.",
-                    resp.status,
-                )
-                self._token = None
-                self._token_acquired_at = None
-                if attempt == 1:
-                    continue
-                raise MinjetAuthError(f"Unauthorized ({resp.status})")
+    async def async_set_stacking_property(
+        self,
+        serial_num: str,
+        key: str,
+        value: Any,
+        order_code: str = "",
+        verify_readback: bool = False,
+    ) -> Any:
+        payload = {
+            "key": key,
+            "orderCode": order_code,
+            "value": value,
+        }
 
-            if 400 <= resp.status < 500:
-                _LOGGER.error(
-                    "Minjet device query returned client error %s. Response body: %s",
-                    resp.status,
-                    text,
-                )
-                raise MinjetApiError(f"Device query client error {resp.status}: {data}")
+        try:
+            data = await self._api_post(
+                f"{SET_STACKING_PROPERTY_ENDPOINT}/{serial_num}",
+                payload,
+                f"set stacking property {key} for {serial_num}",
+            )
+            return data.get("data")
+        except MinjetApiError as err:
+            if not verify_readback or err.status != 504:
+                raise
 
-            if resp.status != 200 or data.get("code") != 200:
-                raise MinjetApiError(f"Device query failed: {data}")
+        await asyncio.sleep(5)
+        current = await self.async_get_device_param(serial_num)
+        if current.get(key) == value:
+            return value
 
-            devices = data.get("data", [])
-            if not isinstance(devices, list):
-                raise MinjetApiError(f"Unexpected response: {data}")
-
-            return devices
-
-        raise MinjetAuthError("Unable to refresh token")
+        raise MinjetApiError(
+            f"Minjet stacking write for {serial_num} timed out and verification failed",
+            status=504,
+            data={"key": key, "value": value},
+        )
 
     async def async_test_credentials(self) -> None:
         await self.async_login()
         await self.async_get_devices()
+
+    async def _api_get(self, url: str, context: str) -> dict[str, Any]:
+        _LOGGER.debug("Minjet %s starting with GET", context)
+        _resp, data, _text = await self._request_json("GET", url)
+        self._validate_api_response(data, context)
+        return data
+
+    async def _api_post(self, url: str, payload: dict[str, Any], context: str) -> dict[str, Any]:
+        _LOGGER.debug("Minjet %s starting with POST", context)
+        _resp, data, _text = await self._request_json("POST", url, json_body=payload)
+        self._validate_api_response(data, context)
+        return data
+
+    async def _request_json(
+        self,
+        method: str,
+        url: str,
+        json_body: dict[str, Any] | None = None,
+        authenticated: bool = True,
+        retry_auth: bool = True,
+    ) -> tuple[aiohttp.ClientResponse, dict[str, Any], str]:
+        attempts = 2 if authenticated and retry_auth else 1
+
+        for attempt in range(1, attempts + 1):
+            headers: dict[str, str] = {}
+            if authenticated:
+                force_refresh = attempt > 1
+                await self._ensure_valid_token(force_refresh=force_refresh)
+
+                if not isinstance(self._token, str) or not self._token.strip():
+                    raise MinjetAuthError(f"Token invalid after login: {self._token!r}")
+
+                headers["Authorization"] = f"Bearer {self._token}"
+
+            requester = self._session.get if method.upper() == "GET" else self._session.post
+            kwargs: dict[str, Any] = {
+                "headers": headers,
+                "timeout": 20,
+            }
+            if json_body is not None:
+                kwargs["json"] = json_body
+
+            async with requester(url, **kwargs) as resp:
+                text = await resp.text()
+
+            try:
+                data = json.loads(text)
+            except Exception as err:
+                raise MinjetApiError(f"Request returned non-JSON for {url}: {text}") from err
+
+            if authenticated and resp.status in (401, 403):
+                _LOGGER.warning("Minjet request returned %s for %s", resp.status, url)
+                self._token = None
+                self._token_acquired_at = None
+                if attempt < attempts:
+                    continue
+                raise MinjetAuthError(f"Unauthorized ({resp.status})")
+
+            if 400 <= resp.status < 500:
+                raise MinjetApiError(
+                    f"Client error {resp.status} for {url}: {data}",
+                    status=resp.status,
+                    data=data,
+                )
+
+            if resp.status >= 500:
+                raise MinjetApiError(
+                    f"Server error {resp.status} for {url}: {data}",
+                    status=resp.status,
+                    data=data,
+                )
+
+            return resp, data, text
+
+        raise MinjetAuthError("Unable to refresh token")
+
+    def _validate_api_response(self, data: dict[str, Any], context: str) -> None:
+        if data.get("code") != 200:
+            raise MinjetApiError(f"Minjet {context} failed: {data}")

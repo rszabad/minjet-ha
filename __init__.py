@@ -18,6 +18,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import MinjetCoordinator
+from .services import async_register_services, async_unregister_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN]["logger"] = _LOGGER
+    hass.data[DOMAIN].setdefault("entries", {})
     return True
 
 
@@ -57,10 +58,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_setup()
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {
+    hass.data[DOMAIN].setdefault("entries", {})
+    hass.data[DOMAIN]["entries"][entry.entry_id] = {
         "coordinator": coordinator,
         "api": api,
     }
+    await async_register_services(hass)
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
@@ -71,12 +74,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        data = hass.data[DOMAIN].pop(entry.entry_id, None)
+        data = hass.data[DOMAIN]["entries"].pop(entry.entry_id, None)
         if data:
             coordinator = data.get("coordinator")
             ws_client = getattr(coordinator, "_ws_client", None)
             if ws_client:
                 await ws_client.stop()
+        await async_unregister_services(hass)
     return unload_ok
 
 
