@@ -134,6 +134,85 @@ data:
 - A timeout does not reliably mean that the device state did not change.
 - After writes for operation mode or discharge limit, verify the resulting value via the updated entities or by refreshing state in Home Assistant.
 
+## Pyscript Zero Export Example
+
+For a first zero-export controller, keep the regulation outside the integration and
+use the provided example at `examples/pyscript/minjet_zero_export.py`.
+
+Recommendation for v1:
+- one Minjet device
+- one grid sensor at the house connection point
+- integration `scan_interval: 5`
+- WebSocket disabled unless you specifically need it
+
+The controller writes only this service:
+
+```yaml
+service: minjet.set_rated_power
+data:
+  serial_num: MH7A482403200216
+  rated_power: 123
+```
+
+The example assumes `pyscript` is configured with `allow_all_imports: true`
+because it imports the tested regulation helper from the Minjet integration.
+It also publishes:
+- `pyscript.minjet_zero_export_active`
+- `pyscript.minjet_zero_export_block_reason`
+- `pyscript.minjet_zero_export_last_grid_power`
+- `pyscript.minjet_zero_export_last_target`
+- `pyscript.minjet_zero_export_last_write_ts`
+
+Required helper entities:
+
+```yaml
+input_boolean:
+  zero_export_enabled:
+    name: Zero export enabled
+
+input_number:
+  zero_export_min_power:
+    name: Zero export min power
+    min: 0
+    max: 800
+    step: 1
+    initial: 0
+  zero_export_max_power:
+    name: Zero export max power
+    min: 0
+    max: 800
+    step: 1
+    initial: 800
+  zero_export_deadband:
+    name: Zero export deadband
+    min: 0
+    max: 200
+    step: 1
+    initial: 30
+  zero_export_step_limit:
+    name: Zero export step limit
+    min: 0
+    max: 800
+    step: 1
+    initial: 100
+  zero_export_last_setpoint:
+    name: Zero export last setpoint
+    min: 0
+    max: 800
+    step: 1
+    initial: 0
+  zero_export_min_write_delta:
+    name: Zero export min write delta
+    min: 0
+    max: 200
+    step: 1
+    initial: 30
+```
+
+The house grid sensor is the control authority. The Minjet `ratedPower` entity is
+diagnostic only and should not be used as the controller's internal state because
+cloud/API latency can lag behind the last successful write.
+
 ## Troubleshooting
 
 Add debug logging in `configuration.yaml`:
